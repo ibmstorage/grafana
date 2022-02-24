@@ -6,12 +6,12 @@ coverage/
 awsconfig
 /.awcache
 /dist
-/public/build
-/public/views/index.html
-/public/views/error.html
+#/public/build
+#/public/views/index.html
+#/public/views/error.html
 /emails/dist
-/public_gen
-/public/vendor/npm
+#/public_gen
+#/public/vendor/npm
 /tmp
 tools/phantomjs/phantomjs
 tools/phantomjs/phantomjs.exe
@@ -24,7 +24,7 @@ docs/GITCOMMIT
 docs/changed-files
 
 # locally required config files
-public/css/*.min.css
+#public/css/*.min.css
 
 # Editor junk
 *.sublime-workspace
@@ -55,7 +55,7 @@ profile.cov
 /pkg/cmd/grafana-server/grafana-server
 /pkg/cmd/grafana-server/debug
 /pkg/extensions
-/public/app/extensions
+#/public/app/extensions
 debug.test
 /examples/*/dist
 /packaging/**/*.rpm
