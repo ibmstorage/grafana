@@ -500,3 +500,4 @@ replace github.com/prometheus/alertmanager => github.com/grafana/prometheus-aler
 exclude github.com/mattn/go-sqlite3 v2.0.3+incompatible
 
 replace github.com/go-sql-driver/mysql => github.com/go-sql-driver/mysql v1.7.1
+replace golang.zx2c4.com/wireguard v0.0.20200121 => golang.zx2c4.com/wireguard v0.0.0-20200121152719-05b03c675090

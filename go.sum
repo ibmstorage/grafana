@@ -5317,3 +5317,4 @@ xorm.io/core v0.7.3 h1:W8ws1PlrnkS1CZU1YWaYLMQcQilwAmQXU0BJDJon+H0=
 xorm.io/core v0.7.3/go.mod h1:jJfd0UAEzZ4t87nbQYtVjmqpIODugN6PD2D9E+dJvdM=
 xorm.io/xorm v0.8.2 h1:nbg1AyWn7iLrwp0Dqg8IrYOBkBYYJ85ry9bvZLVl4Ok=
 xorm.io/xorm v0.8.2/go.mod h1:ZkJLEYLoVyg7amJK/5r779bHyzs2AU8f8VMiP6BM7uY=
+golang.zx2c4.com/wireguard v0.0.0-20200121152719-05b03c675090/go.mod h1:P2HsVp8SKwZEufsnezXZA4GRX/T49/HlU7DGuelXsU4=
