@@ -750,3 +750,4 @@ exclude (
 	// otherwise pulled in as a transitive dependency.
 	k8s.io/client-go v12.0.0+incompatible
 )
+replace golang.zx2c4.com/wireguard v0.0.20200121 => golang.zx2c4.com/wireguard v0.0.0-20200121152719-05b03c675090
