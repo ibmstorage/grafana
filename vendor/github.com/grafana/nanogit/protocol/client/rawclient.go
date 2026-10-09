@@ -1,0 +1,285 @@
+// Package client implements the low-level Git Smart HTTP protocol version 2
+// transport used by the root nanogit package: the info/refs handshake,
+// upload-pack and receive-pack exchanges, authentication headers, retries,
+// and typed errors for common HTTP failures.
+//
+// It is low-level plumbing. Most users should use the root nanogit package
+// instead of this one directly.
+package client
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/grafana/nanogit/metrics"
+	"github.com/grafana/nanogit/options"
+	"github.com/grafana/nanogit/protocol"
+	"github.com/grafana/nanogit/retry"
+)
+
+// RawClient is a client that can be used to make raw Git protocol requests.
+// It is used to implement the Git Smart Protocol version 2 over HTTP/HTTPS transport.
+//
+//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -header ../../internal/tools/fake_header.txt -o ../../mocks/raw_client.go . RawClient
+type RawClient interface {
+	// CanRead reports whether the credentials grant read (fetch) access to
+	// the repository.
+	CanRead(ctx context.Context) (bool, error)
+	// CanWrite reports whether the credentials grant repository-level write
+	// (push) access.
+	CanWrite(ctx context.Context) (bool, error)
+	// IsAuthorized reports whether the client can read from the repository.
+	//
+	// Deprecated: Use CanRead instead.
+	IsAuthorized(ctx context.Context) (bool, error)
+	// SmartInfo performs the GET info/refs handshake for the given service
+	// ("git-upload-pack" or "git-receive-pack").
+	SmartInfo(ctx context.Context, service string) error
+	// IsServerCompatible reports whether the server supports Git protocol
+	// v2, which nanogit requires.
+	IsServerCompatible(ctx context.Context) (bool, error)
+	// UploadPack posts a raw git-upload-pack request body and returns the
+	// response stream. The caller must close it.
+	UploadPack(ctx context.Context, data io.Reader) (io.ReadCloser, error)
+	// ReceivePack posts a raw git-receive-pack request body and checks the
+	// server's status response.
+	ReceivePack(ctx context.Context, data io.Reader) error
+	// FetchReceivePackCapabilities returns the capabilities the server
+	// advertises for git-receive-pack.
+	FetchReceivePackCapabilities(ctx context.Context) ([]protocol.Capability, error)
+	// Fetch requests the objects named in opts.Want and returns the parsed
+	// pack-file objects keyed by hash.
+	Fetch(ctx context.Context, opts FetchOptions) (map[string]*protocol.PackfileObject, error)
+	// LsRefs lists the server's refs via the ls-refs command, optionally
+	// filtered by opts.Prefix.
+	LsRefs(ctx context.Context, opts LsRefsOptions) ([]protocol.RefLine, error)
+}
+
+type rawClient struct {
+	// Base URL of the Git repository
+	base *url.URL
+	// HTTP client used for making requests
+	client *http.Client
+	// User-Agent header value for requests
+	userAgent string
+	// Basic authentication credentials (username/password)
+	basicAuth *struct{ Username, Password string }
+	// Token-based authentication header
+	tokenAuth *string
+	// limits caps response bytes per operation class. Zero values mean
+	// "no limit", preserving historic unbounded behavior for embedders
+	// that don't opt in via options.WithLimits.
+	limits options.Limits
+}
+
+// NewRawClient creates a new Git client for the specified repository URL.
+// The client implements the Git Smart Protocol version 2 over HTTP/HTTPS transport.
+// It supports both HTTP and HTTPS URLs and can be configured with various options
+// for authentication, logging, and HTTP client customization.
+//
+// Parameters:
+//   - repo: Repository URL (must be HTTP or HTTPS)
+//   - options: Configuration options for authentication, logging, etc.
+//
+// Returns:
+//   - Client: Configured Git client interface
+//   - error: Error if URL is invalid or configuration fails
+//
+// Example:
+//
+//	// Create client with basic authentication
+//	client, err := client.NewHTTPClient(
+//	    "https://github.com/user/repo",
+//	    options.WithBasicAuth("username", "password"),
+//	    options.WithLogger(logger),
+//	)
+//	if err != nil {
+//	    return err
+//	}
+func NewRawClient(repo string, opts ...options.Option) (*rawClient, error) {
+	resolved, err := options.Resolve(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return NewRawClientFromOptions(repo, resolved)
+}
+
+// NewRawClientFromOptions constructs a rawClient from already-resolved options.
+// This lets higher layers (e.g., NewHTTPClient) resolve options exactly once
+// and still extract their own client-level fields from the same resolved
+// struct without replaying the option functions.
+func NewRawClientFromOptions(repo string, resolved *options.Options) (*rawClient, error) {
+	if repo == "" {
+		return nil, errors.New("repository URL cannot be empty")
+	}
+	if resolved == nil {
+		return nil, errors.New("resolved options must not be nil")
+	}
+
+	u, err := url.Parse(repo)
+	if err != nil {
+		return nil, fmt.Errorf("parsing url: %w", err)
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, errors.New("only HTTP and HTTPS URLs are supported")
+	}
+
+	if resolved.HTTPClient == nil {
+		resolved.HTTPClient = &http.Client{}
+	}
+
+	u.Path = strings.TrimRight(u.Path, "/")
+	if u.Path != "" && !strings.HasSuffix(u.Path, ".git") && !resolved.SkipGitSuffix {
+		u.Path += ".git"
+	}
+
+	var basicAuth *struct{ Username, Password string }
+	if resolved.BasicAuth != nil {
+		basicAuth = &struct {
+			Username string
+			Password string
+		}{
+			Username: resolved.BasicAuth.Username,
+			Password: resolved.BasicAuth.Password,
+		}
+	}
+
+	return &rawClient{
+		base:      u,
+		client:    resolved.HTTPClient,
+		userAgent: resolved.UserAgent,
+		basicAuth: basicAuth,
+		tokenAuth: resolved.AuthToken,
+		limits:    resolved.Limits,
+	}, nil
+}
+
+// addDefaultHeaders adds the default headers to the request.
+func (c *rawClient) addDefaultHeaders(req *http.Request) {
+	req.Header.Add("Git-Protocol", "version=2")
+	userAgent := c.userAgent
+	if userAgent == "" {
+		userAgent = "nanogit/0"
+	}
+
+	req.Header.Add("User-Agent", userAgent)
+
+	if c.basicAuth != nil {
+		req.SetBasicAuth(c.basicAuth.Username, c.basicAuth.Password)
+	} else if c.tokenAuth != nil {
+		req.Header.Set("Authorization", *c.tokenAuth)
+	}
+}
+
+// do executes an HTTP request with retry logic and server unavailable checks.
+// It wraps the request in retry.Do and automatically checks for server unavailability.
+// Retries are performed on:
+//   - Network errors (timeouts, connection failures, etc.)
+//   - Server errors (5xx status codes)
+//   - Too Many Requests (429 status code)
+//
+// The response body is automatically closed if the server is unavailable.
+// The context is automatically wrapped with an HTTP retrier that wraps any existing retrier.
+//
+// operation identifies the Git protocol operation for the Recorder resolved
+// from ctx (e.g. "smart-info", "upload-pack"); it has no effect on request
+// behavior.
+func (c *rawClient) do(ctx context.Context, operation metrics.Operation, req *http.Request) (*http.Response, error) {
+	// Wrap the context with a temporary error retrier unless retries are disabled
+	baseRetrier := retry.FromContext(ctx)
+	if _, ok := baseRetrier.(*retry.NoopRetrier); !ok {
+		tempRetrier := newTemporaryErrorRetrier(baseRetrier)
+		ctx = retry.ToContext(ctx, tempRetrier)
+	}
+
+	recorder := metrics.FromContext(ctx)
+	attempt := 0
+	return retry.Do(ctx, func() (*http.Response, error) {
+		attempt++
+		start := time.Now()
+
+		res, err := c.client.Do(req)
+		// Snapshot immediately after Do returns for the paths that report
+		// inline below (network failure and server-unavailable). Those
+		// discard the body without handing it to the caller, so the only
+		// meaningful duration is up to this point — and snapshotting here
+		// keeps a slow Body.Close() (e.g. draining a large unread body)
+		// from inflating it.
+		headersDuration := time.Since(start)
+		if err != nil {
+			// A non-nil res alongside a non-nil err only happens when
+			// CheckRedirect rejects a redirect (net/http guarantees
+			// res.Body is already closed in that case); preserve its
+			// status rather than reporting the zero value, which is
+			// reserved for "no response was received at all".
+			var statusCode int
+			if res != nil {
+				statusCode = res.StatusCode
+			}
+			recorder.HTTPRequest(ctx, metrics.HTTPRequestSample{
+				Operation:  operation,
+				StatusCode: statusCode,
+				Duration:   headersDuration,
+				Attempt:    attempt,
+			})
+			return nil, err
+		}
+
+		if err := CheckServerUnavailable(res); err != nil {
+			_ = res.Body.Close()
+			recorder.HTTPRequest(ctx, metrics.HTTPRequestSample{
+				Operation:  operation,
+				StatusCode: res.StatusCode,
+				Duration:   headersDuration,
+				Attempt:    attempt,
+			})
+			return nil, err
+		}
+
+		// The request got a response the caller will consume. Defer the
+		// sample until that caller closes the body so Duration covers the
+		// whole request — including reading the response body, which for
+		// upload-pack is the packfile and often the slowest part — rather
+		// than only the time to headers. Every do() caller closes the
+		// returned body exactly once (on both the success and non-2xx
+		// paths), so this fires exactly once.
+		sample := metrics.HTTPRequestSample{
+			Operation:  operation,
+			StatusCode: res.StatusCode,
+			Attempt:    attempt,
+		}
+		res.Body = &recordOnCloseBody{
+			ReadCloser: res.Body,
+			record: func() {
+				sample.Duration = time.Since(start)
+				recorder.HTTPRequest(ctx, sample)
+			},
+		}
+		return res, nil
+	})
+}
+
+// recordOnCloseBody wraps a response body so a metrics callback fires when
+// the body is closed rather than when the response headers arrived. do()
+// uses it to make HTTPRequestSample.Duration span the full request
+// (send → body read → close) for requests whose body the caller consumes.
+// record runs at most once even if Close is called more than once.
+type recordOnCloseBody struct {
+	io.ReadCloser
+	once   sync.Once
+	record func()
+}
+
+func (b *recordOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.record)
+	return err
+}

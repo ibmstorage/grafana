@@ -1,0 +1,17 @@
+/generated
+/workspace
+/build
+/examples/*/vendor
+/.devbox
+/gradle.properties
+/vendor
+/cog
+/docs-site
+
+# Java building folders
+.gradle/
+build/
+
+.idea
+
+dist/

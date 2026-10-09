@@ -1,0 +1,96 @@
+package useragent
+
+import (
+	"context"
+	"errors"
+	"regexp"
+)
+
+var (
+	userAgentRegex   = regexp.MustCompile(`^Grafana/([0-9]+\.[0-9]+\.[0-9]+(?:[^\s]+)?) \(([a-zA-Z0-9]+); ([a-zA-Z0-9]+)\)$`)
+	errInvalidFormat = errors.New("invalid user agent format")
+)
+
+// UserAgent represents a Grafana user agent.
+// Its format is "Grafana/<version> (<os>; <arch>)"
+// Example: "Grafana/7.0.0-beta1 (darwin; amd64)", "Grafana/10.0.0 (windows; x86)"
+type UserAgent struct {
+	grafanaVersion string
+	arch           string
+	os             string
+	unknown        bool
+}
+
+// New creates a new UserAgent.
+// The version must be a valid semver string, and the os and arch must be valid strings.
+func New(grafanaVersion, os, arch string) (*UserAgent, error) {
+	ua := &UserAgent{
+		grafanaVersion: grafanaVersion,
+		os:             os,
+		arch:           arch,
+	}
+
+	return Parse(ua.String())
+}
+
+// Parse creates a new UserAgent from a string.
+func Parse(s string) (*UserAgent, error) {
+	matches := userAgentRegex.FindStringSubmatch(s)
+	if len(matches) != 4 {
+		return nil, errInvalidFormat
+	}
+
+	return &UserAgent{
+		grafanaVersion: matches[1],
+		os:             matches[2],
+		arch:           matches[3],
+	}, nil
+}
+
+// Empty creates a new UserAgent representing an unknown Grafana instance,
+// e.g. because none was provided by the Grafana instance that made the request.
+func Empty() *UserAgent {
+	return &UserAgent{
+		grafanaVersion: "0.0.0",
+		os:             "unknown",
+		arch:           "unknown",
+		unknown:        true,
+	}
+}
+
+func (ua *UserAgent) GrafanaVersion() string {
+	return ua.grafanaVersion
+}
+
+// IsUnknown returns true if this UserAgent represents an unknown Grafana instance (see Empty),
+// rather than one parsed from an actual Grafana-supplied user agent string.
+func (ua *UserAgent) IsUnknown() bool {
+	return ua.unknown
+}
+
+func (ua *UserAgent) String() string {
+	return "Grafana/" + ua.grafanaVersion + " (" + ua.os + "; " + ua.arch + ")"
+}
+
+type userAgentKey struct{}
+
+// FromContext returns user agent from context.
+func FromContext(ctx context.Context) *UserAgent {
+	v := ctx.Value(userAgentKey{})
+	if v == nil {
+		return Empty()
+	}
+
+	ua := v.(*UserAgent)
+	if ua == nil {
+		return Empty()
+	}
+
+	return ua
+}
+
+// WithUserAgent injects supplied user agent into context.
+func WithUserAgent(ctx context.Context, ua *UserAgent) context.Context {
+	ctx = context.WithValue(ctx, userAgentKey{}, ua)
+	return ctx
+}

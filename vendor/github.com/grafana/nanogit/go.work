@@ -1,0 +1,9 @@
+go 1.26.6
+
+use (
+	.
+	./cli
+	./gittest
+	./tests
+	./perf
+)
